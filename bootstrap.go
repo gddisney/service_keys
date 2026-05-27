@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gddisney/logger"
 	"github.com/gddisney/ultimate_db"
 	"github.com/gddisney/webauthnext"
 	"github.com/google/go-tpm/legacy/tpm2"
@@ -20,6 +21,7 @@ import (
 type ServiceKeyManager struct {
 	Provider *webauthnext.Provider
 	DB       *ultimate_db.DB
+	Logger   *logger.LogDispatcher // Injected Logger
 }
 
 // RegisterServiceIdentity binds an agent to the identity stack.
@@ -28,6 +30,7 @@ func (s *ServiceKeyManager) RegisterServiceIdentity(name string, tpmPublicBytes 
 	// 1. Validate that the provided bytes are a legitimate TPM 2.0 Public Key structure
 	_, err := tpm2.DecodePublic(tpmPublicBytes)
 	if err != nil {
+		if s.Logger != nil { s.Logger.Error(fmt.Sprintf("Failed to decode TPM2B_PUBLIC structure for %s: %v", name, err)) }
 		return fmt.Errorf("failed to decode TPM2B_PUBLIC structure: %w", err)
 	}
 
@@ -45,6 +48,10 @@ func (s *ServiceKeyManager) RegisterServiceIdentity(name string, tpmPublicBytes 
 	err = s.DB.Write(webauthnext.AuthPageID, txn, []byte("user:"+name), val, 0)
 	s.DB.CommitTxn(txn)
 	
+	if err == nil && s.Logger != nil {
+		s.Logger.Audit("system", "TPM_REGISTERED", "Registered new hardware-backed service identity: "+name)
+	}
+	
 	return err
 }
 
@@ -53,6 +60,7 @@ func (s *ServiceKeyManager) VerifyServiceSession(next http.HandlerFunc) http.Han
 	return func(w http.ResponseWriter, r *http.Request) {
 		proof := r.Header.Get("X-DBSC-Hardware-Proof")
 		if proof == "" {
+			if s.Logger != nil { s.Logger.Audit("unknown_agent", "TPM_AUTH_FAILED", "Hardware proof required but missing") }
 			http.Error(w, "Hardware proof required", http.StatusUnauthorized)
 			return
 		}
@@ -60,6 +68,7 @@ func (s *ServiceKeyManager) VerifyServiceSession(next http.HandlerFunc) http.Han
 		// Parse the proof (Format: Name:Nonce:SignatureBase64)
 		parts := strings.SplitN(proof, ":", 3)
 		if len(parts) != 3 {
+			if s.Logger != nil { s.Logger.Audit("unknown_agent", "TPM_AUTH_FAILED", "Malformed DBSC proof payload format") }
 			http.Error(w, "Malformed DBSC proof", http.StatusBadRequest)
 			return
 		}
@@ -71,12 +80,14 @@ func (s *ServiceKeyManager) VerifyServiceSession(next http.HandlerFunc) http.Han
 		s.DB.CommitTxn(txn)
 
 		if err != nil || len(userBytes) == 0 {
+			if s.Logger != nil { s.Logger.Audit(serviceName, "TPM_AUTH_FAILED", "Service identity not found in registry") }
 			http.Error(w, "Service identity not found", http.StatusUnauthorized)
 			return
 		}
 
 		var user webauthnext.PasskeyUser
 		if err := json.Unmarshal(userBytes, &user); err != nil {
+			if s.Logger != nil { s.Logger.Error("Corrupted identity record for: " + serviceName) }
 			http.Error(w, "Corrupted identity record", http.StatusInternalServerError)
 			return
 		}
@@ -84,12 +95,14 @@ func (s *ServiceKeyManager) VerifyServiceSession(next http.HandlerFunc) http.Han
 		// 2. Decode the stored TPM2B_PUBLIC structure
 		tpmPubKey, err := tpm2.DecodePublic(user.ID)
 		if err != nil {
+			if s.Logger != nil { s.Logger.Error("Failed to parse stored TPM key for: " + serviceName) }
 			http.Error(w, "Failed to parse stored TPM key", http.StatusInternalServerError)
 			return
 		}
 
 		cryptoKey, err := tpmPubKey.Key()
 		if err != nil {
+			if s.Logger != nil { s.Logger.Error("Failed to extract cryptographic key for: " + serviceName) }
 			http.Error(w, "Failed to extract cryptographic key", http.StatusInternalServerError)
 			return
 		}
@@ -97,6 +110,7 @@ func (s *ServiceKeyManager) VerifyServiceSession(next http.HandlerFunc) http.Han
 		// 3. Decode the signature sent by the agent
 		signature, err := base64.StdEncoding.DecodeString(sigBase64)
 		if err != nil {
+			if s.Logger != nil { s.Logger.Audit(serviceName, "TPM_AUTH_FAILED", "Invalid base64 signature encoding") }
 			http.Error(w, "Invalid signature encoding", http.StatusBadRequest)
 			return
 		}
@@ -107,12 +121,14 @@ func (s *ServiceKeyManager) VerifyServiceSession(next http.HandlerFunc) http.Han
 
 		rsaPubKey, ok := cryptoKey.(*rsa.PublicKey)
 		if !ok {
+			if s.Logger != nil { s.Logger.Error("Unsupported TPM key type (expected RSA) for: " + serviceName) }
 			http.Error(w, "Unsupported TPM key type (expected RSA)", http.StatusInternalServerError)
 			return
 		}
 
 		err = rsa.VerifyPKCS1v15(rsaPubKey, crypto.SHA256, payloadHash[:], signature)
 		if err != nil {
+			if s.Logger != nil { s.Logger.Audit(serviceName, "TPM_AUTH_FAILED", "Hardware signature verification failed") }
 			http.Error(w, "Hardware signature verification failed", http.StatusForbidden)
 			return
 		}
@@ -121,8 +137,13 @@ func (s *ServiceKeyManager) VerifyServiceSession(next http.HandlerFunc) http.Han
 		var timestamp int64
 		fmt.Sscanf(nonce, "%d", &timestamp)
 		if time.Now().Unix()-timestamp > 60 {
+			if s.Logger != nil { s.Logger.Audit(serviceName, "TPM_AUTH_FAILED", "DBSC Proof expired (Possible replay attack)") }
 			http.Error(w, "DBSC Proof expired", http.StatusForbidden)
 			return
+		}
+
+		if s.Logger != nil {
+			s.Logger.Info("TPM DBSC hardware session verified for service: " + serviceName)
 		}
 
 		next(w, r)
