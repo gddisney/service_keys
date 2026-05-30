@@ -3,14 +3,14 @@ module github.com/gddisney/service_keys
 go 1.25.10
 
 require (
-	github.com/gddisney/ultimate_db v1.0.5
-	github.com/gddisney/webauthnext v1.0.4-0.20260524153217-1a6dcbb0fa9f
+	github.com/0TrustCloud/ultimate_db v1.0.5
+	github.com/0TrustCloud/webauthnext v1.0.4-0.20260524153217-1a6dcbb0fa9f
 	github.com/google/go-tpm v0.9.8
 )
 
 require (
 	github.com/fxamacker/cbor/v2 v2.7.0 // indirect
-	github.com/gddisney/guikit v1.0.4 // indirect
+	github.com/0TrustCloud/guikit v1.0.4 // indirect
 	github.com/go-webauthn/webauthn v0.11.2 // indirect
 	github.com/go-webauthn/x v0.1.14 // indirect
 	github.com/golang-jwt/jwt/v5 v5.2.1 // indirect
